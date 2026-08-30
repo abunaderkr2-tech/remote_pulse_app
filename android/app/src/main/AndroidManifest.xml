@@ -1,11 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- الصلاحيات الأساسية لشبكة الإنترنت وإرسال البيانات -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
-
-    <!-- صلاحيات الوصول للصور والفيديوهات لإصدارات أندرويد القديمة والحديثة -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32" />
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
@@ -31,8 +28,7 @@
             
             <meta-data
               android:name="io.flutter.embedding.android.NormalTheme"
-              android:resource="@style/NormalTheme"
-              />
+              android:resource="@style/NormalTheme" />
               
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
@@ -45,7 +41,6 @@
             android:value="2" />
     </application>
 
-    <!-- السماح للتطبيق بالتفاعل مع معرض الصور والمستعرضات الخارجية -->
     <queries>
         <intent>
             <action android:name="android.intent.action.GET_CONTENT" />
@@ -56,5 +51,4 @@
             <data android:mimeType="image/*" />
         </intent>
     </queries>
-
 </manifest>

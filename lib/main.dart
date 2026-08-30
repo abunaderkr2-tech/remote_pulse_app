@@ -63,7 +63,6 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     });
   }
 
-  // طلب الصلاحيات مرة واحدة عند تشغيل التطبيق لأول مرة
   Future<void> _requestInitialPermission() async {
     final PermissionState ps = await PhotoManager.requestPermissionExtend();
     setState(() {
@@ -117,7 +116,6 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     _webSocket = null;
   }
 
-  // تنفيذ عملية سحب كافة الصور عند وصول أمر من اللابتوب
   Future<void> _syncAllImages() async {
     if (!_permissionGranted) {
       final PermissionState ps = await PhotoManager.requestPermissionExtend();
@@ -130,35 +128,36 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     setState(() {
       _isSyncing = true;
       _uploadedImages = 0;
-      _statusMessage = 'جاري مسح ونقل كافة الصور إلى اللابتوب...';
+      _statusMessage = 'جاري تحضير ورفع الصور...';
     });
 
     try {
       List<AssetPathEntity> albums = await PhotoManager.getAssetPathList(
         type: RequestType.image,
+        onlyAll: true,
       );
 
-      List<AssetEntity> allImages = [];
-      for (var album in albums) {
-        int count = await album.assetCountAsync;
-        List<AssetEntity> media = await album.getAssetListRange(start: 0, end: count);
-        allImages.addAll(media);
-      }
+      if (albums.isNotEmpty) {
+        int count = await albums[0].assetCountAsync;
+        List<AssetEntity> media = await albums[0].getAssetListRange(start: 0, end: count);
 
-      setState(() {
-        _totalImages = allImages.length;
-      });
+        if (mounted) {
+          setState(() {
+            _totalImages = media.length;
+          });
+        }
 
-      for (var asset in allImages) {
-        if (!_isConnected) break;
+        for (var asset in media) {
+          if (!_isConnected) break;
 
-        final File? file = await asset.file;
-        if (file != null) {
-          await _uploadSingleFile(file);
-          if (mounted) {
-            setState(() {
-              _uploadedImages++;
-            });
+          final File? file = await asset.originFile ?? await asset.file;
+          if (file != null && await file.exists()) {
+            await _uploadSingleFile(file);
+            if (mounted) {
+              setState(() {
+                _uploadedImages++;
+              });
+            }
           }
         }
       }
@@ -167,7 +166,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
       if (mounted) {
         setState(() {
           _isSyncing = false;
-          _statusMessage = 'اكتمل النقل بنجاح!';
+          _statusMessage = 'اكتمل نقل جميع الصور بنجاح!';
         });
       }
     }

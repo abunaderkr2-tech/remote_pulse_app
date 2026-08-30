@@ -1,6 +1,5 @@
-package com.example.flutter_application_1 // أعد وضع اسم الحزمة الخاص بك إذا كان مختلفاً
+package com.example.flutter_application_1
 
-import android.content.ContentUris
 import android.provider.MediaStore
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine

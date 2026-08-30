@@ -32,45 +32,78 @@ class MainHomeScreen extends StatefulWidget {
 }
 
 class _MainHomeScreenState extends State<MainHomeScreen> {
-  // عنوان السيرفر المحلي أو الثابت (قم بتعديل IP والسيرفر حسب الإعدادات الخاصة بك)
-  final String _serverIp = '192.168.1.100'; 
-  final int _serverPort = 8080;
+  static const int udpPort = 8888; // البورت المخصص للبحث التلقائي
+  static const int tcpPort = 8080; // بورت الاتصال الرئيسي
 
   bool _isConnected = false;
-  String _statusMessage = 'جاري محاولة الاتصال بالسيرفر...';
-  Timer? _pingTimer;
+  String _statusMessage = 'جاري البحث عن السيرفر تلقائياً...';
   Socket? _socket;
+  RawDatagramSocket? _udpSocket;
+  Timer? _searchTimer;
 
   @override
   void initState() {
     super.initState();
-    _connectToServer();
-    // إرسال نبضة استعادة اتصال كل 10 ثوانٍ لضمان بقاء التطبيق متصلاً 24 ساعة
-    _pingTimer = Timer.periodic(const Duration(seconds: 10), (timer) {
+    _startAutoDiscovery();
+    // إعادة محاولة البحث كل 5 ثوانٍ في حال عدم الاتصال
+    _searchTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
       if (!_isConnected) {
-        _connectToServer();
+        _sendBroadcastQuery();
       }
     });
   }
 
-  Future<void> _connectToServer() async {
+  // بدء الاستماع لردود السيرفر عبر UDP
+  Future<void> _startAutoDiscovery() async {
     try {
-      _socket = await Socket.connect(_serverIp, _serverPort, timeout: const Duration(seconds: 5));
+      _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+      _udpSocket?.broadcastEnabled = true;
+
+      _udpSocket?.listen((RawSocketEvent event) {
+        if (event == RawSocketEvent.read) {
+          Datagram? dg = _udpSocket?.receive();
+          if (dg != null) {
+            String message = String.fromCharCodes(dg.data).trim();
+            if (message == 'SERVER_HERE' && !_isConnected) {
+              String serverIp = dg.address.address;
+              _connectToServer(serverIp);
+            }
+          }
+        }
+      });
+
+      _sendBroadcastQuery();
+    } catch (e) {
+      setState(() {
+        _statusMessage = 'حدث خطأ أثناء البحث عن السيرفر';
+      });
+    }
+  }
+
+  // إرسال نداء في الشبكة البحثية
+  void _sendBroadcastQuery() {
+    if (_isConnected) return;
+    try {
+      List<int> data = 'DISCOVER_SERVER'.codeUnits;
+      _udpSocket?.send(data, InternetAddress('255.255.255.255'), udpPort);
+    } catch (e) {
+      // إهمال الأخطاء أثناء التكرار
+    }
+  }
+
+  // الاتصال المباشر بالسيرفر فور اكتشاف الـ IP
+  Future<void> _connectToServer(String ip) async {
+    try {
+      _socket = await Socket.connect(ip, tcpPort, timeout: const Duration(seconds: 5));
       setState(() {
         _isConnected = true;
-        _statusMessage = 'متصل بالسيرفر بنجاح';
+        _statusMessage = 'تم اكتشاف السيرفر والاتصال بنجاح!\nIP: $ip';
       });
 
       _socket?.listen(
-        (data) {
-          // استقبال الأوامر من السيرفر
-        },
-        onError: (error) {
-          _handleDisconnect();
-        },
-        onDone: () {
-          _handleDisconnect();
-        },
+        (data) {},
+        onError: (e) => _handleDisconnect(),
+        onDone: () => _handleDisconnect(),
       );
     } catch (e) {
       _handleDisconnect();
@@ -81,7 +114,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     if (mounted) {
       setState(() {
         _isConnected = false;
-        _statusMessage = 'تعذر الاتصال، يتم إعادة المحاولة...';
+        _statusMessage = 'تم قطع الاتصال، جاري إعادة البحث تلقائياً...';
       });
     }
     _socket?.destroy();
@@ -90,7 +123,8 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
 
   @override
   void dispose() {
-    _pingTimer?.cancel();
+    _searchTimer?.cancel();
+    _udpSocket?.close();
     _socket?.destroy();
     super.dispose();
   }
@@ -110,9 +144,9 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               Icon(
-                _isConnected ? Icons.check_circle : Icons.error_outline,
+                _isConnected ? Icons.check_circle : Icons.sync,
                 size: 90,
-                color: _isConnected ? Colors.green : Colors.red,
+                color: _isConnected ? Colors.green : Colors.orange,
               ),
               const SizedBox(height: 20),
               Text(
@@ -122,9 +156,9 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
               ),
               const SizedBox(height: 30),
               ElevatedButton.icon(
-                onPressed: _connectToServer,
-                icon: const Icon(Icons.refresh),
-                label: const Text('تحديث الاتصال'),
+                onPressed: _sendBroadcastQuery,
+                icon: const Icon(Icons.search),
+                label: const Text('إعادة البحث عن السيرفر'),
               ),
             ],
           ),

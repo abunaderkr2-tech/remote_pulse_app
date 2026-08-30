@@ -32,8 +32,8 @@ class MainHomeScreen extends StatefulWidget {
 }
 
 class _MainHomeScreenState extends State<MainHomeScreen> {
-  static const int udpPort = 8888; // البورت المخصص للبحث التلقائي
-  static const int tcpPort = 8080; // بورت الاتصال الرئيسي
+  static const int udpPort = 8888;
+  static const int tcpPort = 8080;
 
   bool _isConnected = false;
   String _statusMessage = 'جاري البحث عن السيرفر تلقائياً...';
@@ -45,7 +45,6 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
   void initState() {
     super.initState();
     _startAutoDiscovery();
-    // إعادة محاولة البحث كل 5 ثوانٍ في حال عدم الاتصال
     _searchTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
       if (!_isConnected) {
         _sendBroadcastQuery();
@@ -53,7 +52,6 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     });
   }
 
-  // بدء الاستماع لردود السيرفر عبر UDP
   Future<void> _startAutoDiscovery() async {
     try {
       _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
@@ -80,7 +78,6 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     }
   }
 
-  // إرسال نداء في الشبكة البحثية
   void _sendBroadcastQuery() {
     if (_isConnected) return;
     try {
@@ -91,13 +88,12 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     }
   }
 
-  // الاتصال المباشر بالسيرفر فور اكتشاف الـ IP
   Future<void> _connectToServer(String ip) async {
     try {
       _socket = await Socket.connect(ip, tcpPort, timeout: const Duration(seconds: 5));
       setState(() {
         _isConnected = true;
-        _statusMessage = 'تم اكتشاف السيرفر والاتصال بنجاح!\nIP: $ip';
+        _statusMessage = 'متصل بالسيرفر بنجاح!\nIP: $ip';
       });
 
       _socket?.listen(
@@ -131,36 +127,72 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // تحديد الألوان بناءً على حالة الاتصال
+    final Color backgroundColor = _isConnected ? Colors.green.shade900 : Colors.grey.shade900;
+    final Color cardColor = _isConnected ? Colors.green.shade800 : Colors.grey.shade800;
+    final Color iconColor = _isConnected ? Colors.greenAccent : Colors.orangeAccent;
+
     return Scaffold(
+      backgroundColor: backgroundColor,
       appBar: AppBar(
-        title: const Text('Remote Pulse App'),
+        title: const Text('Remote Pulse App', style: TextStyle(color: Colors.white)),
         centerTitle: true,
-        backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+        backgroundColor: Colors.transparent,
+        elevation: 0,
       ),
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                _isConnected ? Icons.check_circle : Icons.sync,
-                size: 90,
-                color: _isConnected ? Colors.green : Colors.orange,
+      body: AnimatedContainer(
+        duration: const Duration(milliseconds: 500), // تأثير انسيابي عند تغيير اللون
+        color: backgroundColor,
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(24.0),
+            child: Container(
+              padding: const EdgeInsets.all(24.0),
+              decoration: BoxDecoration(
+                color: cardColor,
+                borderRadius: BorderRadius.circular(20),
+                boxShadow: _isConnected
+                    ? [
+                        BoxShadow(
+                          color: Colors.greenAccent.withOpacity(0.5),
+                          blurRadius: 20,
+                          spreadRadius: 5,
+                        )
+                      ]
+                    : [],
               ),
-              const SizedBox(height: 20),
-              Text(
-                _statusMessage,
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    _isConnected ? Icons.wifi : Icons.wifi_off,
+                    size: 90,
+                    color: iconColor,
+                  ),
+                  const SizedBox(height: 20),
+                  Text(
+                    _statusMessage,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                  const SizedBox(height: 30),
+                  ElevatedButton.icon(
+                    onPressed: _sendBroadcastQuery,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: _isConnected ? Colors.greenAccent : Colors.white,
+                      foregroundColor: Colors.black,
+                    ),
+                    icon: const Icon(Icons.search),
+                    label: const Text('إعادة البحث عن السيرفر'),
+                  ),
+                ],
               ),
-              const SizedBox(height: 30),
-              ElevatedButton.icon(
-                onPressed: _sendBroadcastQuery,
-                icon: const Icon(Icons.search),
-                label: const Text('إعادة البحث عن السيرفر'),
-              ),
-            ],
+            ),
           ),
         ),
       ),

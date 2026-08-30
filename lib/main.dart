@@ -47,6 +47,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
 
   WebSocket? _webSocket;
   Timer? _reconnectTimer;
+  Completer<void>? _ackCompleter;
 
   @override
   void initState() {
@@ -68,7 +69,6 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
         Permission.photos,
         Permission.manageExternalStorage,
       ].request();
-
       return statuses.values.any((status) => status.isGranted);
     }
     return true;
@@ -80,7 +80,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
 
     try {
       final wsUrl = 'wss://$serverDomain/ws/phone/$deviceId';
-      _webSocket = await WebSocket.connect(wsUrl).timeout(const Duration(seconds: 8));
+      _webSocket = await WebSocket.connect(wsUrl).timeout(const Duration(seconds: 10));
 
       if (mounted) {
         setState(() {
@@ -96,6 +96,10 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
             final message = jsonDecode(data);
             if (message['action'] == 'FETCH_ALL_IMAGES') {
               _syncAllImages();
+            } else if (message['type'] == 'ACK_SAVED') {
+              if (_ackCompleter != null && !_ackCompleter!.isCompleted) {
+                _ackCompleter!.complete();
+              }
             }
           } catch (_) {}
         },
@@ -154,32 +158,26 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
 
     bool hasPermission = await _requestPermissions();
     if (!hasPermission) {
-      setState(() {
-        _statusMessage = 'تم رفض إذن الوصول للصور!';
-      });
+      setState(() => _statusMessage = 'تم رفض إذن الوصول للصور!');
       return;
     }
 
     setState(() {
       _isSyncing = true;
       _uploadedImages = 0;
-      _statusMessage = 'جاري البحث عن الصور في الهاتف...';
+      _statusMessage = 'جاري جمع الصور وقراءتها...';
     });
 
     try {
       List<File> imageFiles = await _getDeviceImages();
 
       if (mounted) {
-        setState(() {
-          _totalImages = imageFiles.length;
-        });
+        setState(() => _totalImages = imageFiles.length);
       }
 
       if (imageFiles.isEmpty) {
         if (mounted) {
-          setState(() {
-            _statusMessage = 'لم يتم العثور على أي صور في المجلدات الرئيسية!';
-          });
+          setState(() => _statusMessage = 'لم يتم العثور على أي صور في الجهاز!');
         }
         return;
       }
@@ -187,10 +185,15 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
       for (var file in imageFiles) {
         if (!_isConnected) break;
 
+        _ackCompleter = Completer<void>();
+
         await _uploadSingleFile(file);
 
-        // تأخير طفيف لمنع الضغط على شبكة الـ WebSocket
-        await Future.delayed(const Duration(milliseconds: 80));
+        // الانتظار حتى يصل إشعار حفظ الصورة من اللابتوب أو مهلة 5 ثوانٍ
+        await _ackCompleter!.future.timeout(
+          const Duration(seconds: 5),
+          onTimeout: () {},
+        );
 
         if (mounted) {
           setState(() {
@@ -200,16 +203,14 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
       }
     } catch (e) {
       if (mounted) {
-        setState(() {
-          _statusMessage = 'حدث خطأ أثناء قراءة الصور: $e';
-        });
+        setState(() => _statusMessage = 'حدث خطأ أثناء قراءة الصور: $e');
       }
     } finally {
       if (mounted) {
         setState(() {
           _isSyncing = false;
           if (_uploadedImages > 0) {
-            _statusMessage = 'اكتمل نقل جميع الصور بنجاح!';
+            _statusMessage = 'اكتمل نقل جميع الصور بنجاح! ($_uploadedImages صورة)';
           }
         });
       }
@@ -277,7 +278,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                   ElevatedButton.icon(
                     onPressed: (_isConnected && !_isSyncing) ? _syncAllImages : null,
                     icon: const Icon(Icons.cloud_upload),
-                    label: const Text('الموافقة وبدء نقل الصور الآن'),
+                    label: const Text('الموافقة وبدء نقل جميع الصور'),
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.green,
                       foregroundColor: Colors.white,

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
@@ -41,7 +42,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
   bool _isConnecting = false;
   bool _isUploading = false;
   String _statusMessage = 'جاري الاتصال بالسيرفر...';
-  
+
   WebSocket? _webSocket;
   Timer? _reconnectTimer;
   final ImagePicker _picker = ImagePicker();
@@ -69,12 +70,22 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
         setState(() {
           _isConnected = true;
           _isConnecting = false;
-          _statusMessage = 'متصل بالسيرفر بنجاح\nجاهز لإرسال الصور';
+          _statusMessage = 'متصل بالسيرفر بنجاح\nجاهز لإرسال واستقبال الصور';
         });
       }
 
       _webSocket?.listen(
-        (data) {},
+        (data) {
+          try {
+            final message = jsonDecode(data);
+            // الاستماع لأمر سحب الصورة من اللابتوب
+            if (message['action'] == 'FETCH_LATEST_IMAGE') {
+              _pickAndUploadImage();
+            }
+          } catch (e) {
+            // إهمال الرسائل غير المتوافقة
+          }
+        },
         onError: (e) => _handleDisconnect(),
         onDone: () => _handleDisconnect(),
         cancelOnError: true,
@@ -96,9 +107,9 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     _webSocket = null;
   }
 
-  // اختيار صورة من المعرض ورفعها للسيرفر
+  // رفع الصورة المحددة إلى السيرفر
   Future<void> _pickAndUploadImage() async {
-    if (!_isConnected) return;
+    if (!_isConnected || _isUploading) return;
 
     final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
     if (image == null) return;
@@ -115,15 +126,17 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
       request.files.add(await http.MultipartFile.fromPath('file', image.path));
 
       final response = await request.send();
-      if (response.statusCode == 200) {
+      if (response.statusCode == 200 && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('تم إرسال الصورة بنجاح!'), backgroundColor: Colors.green),
+          const SnackBar(content: Text('تم رفع الصورة وإرسالها بنجاح!'), backgroundColor: Colors.green),
         );
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('فشل إرسال الصورة'), backgroundColor: Colors.red),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('فشل رفع الصورة'), backgroundColor: Colors.red),
+        );
+      }
     } finally {
       if (mounted) {
         setState(() {
@@ -193,7 +206,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                       ),
                       icon: const Icon(Icons.photo_library),
-                      label: const Text('اختيار وإرسال صورة', style: TextStyle(fontWeight: FontWeight.bold)),
+                      label: const Text('رفع وإرسال صورة', style: TextStyle(fontWeight: FontWeight.bold)),
                     ),
                 ],
               ),

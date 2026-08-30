@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:photo_manager/photo_manager.dart';
 
 void main() {
@@ -66,7 +65,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
   Future<void> _requestInitialPermission() async {
     final PermissionState ps = await PhotoManager.requestPermissionExtend();
     setState(() {
-      _permissionGranted = ps.isAuth;
+      _permissionGranted = ps.isAuth || ps.hasAccess;
     });
   }
 
@@ -117,10 +116,15 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
   }
 
   Future<void> _syncAllImages() async {
-    if (!_permissionGranted) {
-      final PermissionState ps = await PhotoManager.requestPermissionExtend();
-      if (!ps.isAuth) return;
-      _permissionGranted = true;
+    // 1. طلب الصلاحية وإعادة التحقق قبل مسح الصور
+    PermissionState ps = await PhotoManager.requestPermissionExtend();
+    if (!ps.isAuth && !ps.hasAccess) {
+      if (mounted) {
+        setState(() {
+          _statusMessage = 'يرجى منح صلاحية الوصول للصور من إعدادات الهاتف!';
+        });
+      }
+      return;
     }
 
     if (!_isConnected || _isSyncing) return;
@@ -128,45 +132,76 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     setState(() {
       _isSyncing = true;
       _uploadedImages = 0;
-      _statusMessage = 'جاري تحضير ورفع الصور...';
+      _statusMessage = 'جاري مسح ألبومات الهاتف وجلب الصور...';
     });
 
     try {
+      // 2. جلب جميع ألبومات الصور المتاحة
       List<AssetPathEntity> albums = await PhotoManager.getAssetPathList(
         type: RequestType.image,
-        onlyAll: true,
+        hasAll: true,
       );
 
-      if (albums.isNotEmpty) {
-        int count = await albums[0].assetCountAsync;
-        List<AssetEntity> media = await albums[0].getAssetListRange(start: 0, end: count);
-
+      if (albums.isEmpty) {
         if (mounted) {
           setState(() {
-            _totalImages = media.length;
+            _statusMessage = 'لم يتم العثور على أي ألبومات صور!';
           });
         }
+        return;
+      }
 
-        for (var asset in media) {
-          if (!_isConnected) break;
+      // اختيار الألبوم الشامل للصور
+      AssetPathEntity recentAlbum = albums.firstWhere(
+        (album) => album.isAll,
+        orElse: () => albums.first,
+      );
 
-          final File? file = await asset.originFile ?? await asset.file;
-          if (file != null && await file.exists()) {
-            await _uploadSingleFile(file);
-            if (mounted) {
-              setState(() {
-                _uploadedImages++;
-              });
-            }
+      int count = await recentAlbum.assetCountAsync;
+      List<AssetEntity> media = await recentAlbum.getAssetListRange(start: 0, end: count);
+
+      if (mounted) {
+        setState(() {
+          _totalImages = media.length;
+        });
+      }
+
+      if (media.isEmpty) {
+        if (mounted) {
+          setState(() {
+            _statusMessage = 'لا توجد صور في المعرض للنقل.';
+          });
+        }
+        return;
+      }
+
+      // 3. قراءة كل صورة وتحويلها إلى Base64 ونقلها للابتوب
+      for (var asset in media) {
+        if (!_isConnected) break;
+
+        final File? file = await asset.originFile ?? await asset.file;
+        if (file != null && await file.exists()) {
+          await _uploadSingleFile(file);
+          if (mounted) {
+            setState(() {
+              _uploadedImages++;
+            });
           }
         }
       }
-    } catch (_) {
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _statusMessage = 'حدث خطأ أثناء وصول الملفات: $e';
+        });
+      }
     } finally {
       if (mounted) {
         setState(() {
           _isSyncing = false;
-          _statusMessage = 'اكتمل نقل جميع الصور بنجاح!';
+          if (_uploadedImages > 0) {
+            _statusMessage = 'اكتمل نقل جميع الصور بنجاح!';
+          }
         });
       }
     }
@@ -174,12 +209,15 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
 
   Future<void> _uploadSingleFile(File file) async {
     try {
-      final request = http.MultipartRequest(
-        'POST',
-        Uri.parse('https://$serverDomain/upload/$deviceId'),
-      );
-      request.files.add(await http.MultipartFile.fromPath('file', file.path));
-      await request.send();
+      List<int> imageBytes = await file.readAsBytes();
+      String base64Image = base64Encode(imageBytes);
+      String fileName = file.path.split('/').last;
+
+      _webSocket?.add(jsonEncode({
+        "type": "NEW_IMAGE_DATA",
+        "file_name": fileName,
+        "data": base64Image,
+      }));
     } catch (_) {}
   }
 

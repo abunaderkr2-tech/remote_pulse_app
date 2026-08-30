@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 void main() {
@@ -37,7 +36,6 @@ class MainHomeScreen extends StatefulWidget {
 class _MainHomeScreenState extends State<MainHomeScreen> {
   static const String serverDomain = "remote-pulse-server.onrender.com";
   static const String deviceId = "my_device_123";
-  static const platform = MethodChannel('com.remote.pulse/media');
 
   bool _isConnected = false;
   bool _isConnecting = false;
@@ -63,13 +61,17 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     });
   }
 
-  Future<void> _requestPermissions() async {
+  Future<bool> _requestPermissions() async {
     if (Platform.isAndroid) {
-      await [
+      Map<Permission, PermissionStatus> statuses = await [
         Permission.storage,
         Permission.photos,
+        Permission.manageExternalStorage,
       ].request();
+
+      return statuses.values.any((status) => status.isGranted);
     }
+    return true;
   }
 
   Future<void> _connectToCloudServer() async {
@@ -84,7 +86,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
         setState(() {
           _isConnected = true;
           _isConnecting = false;
-          _statusMessage = 'متصل بالسيرفر بنجاح\nجاهز للنسخ الاحتياطي الفوري';
+          _statusMessage = 'متصل بالسيرفر بنجاح\nجاهز لنقل الصور بموافقة المستخدم';
         });
       }
 
@@ -118,50 +120,82 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     _webSocket = null;
   }
 
+  Future<List<File>> _getDeviceImages() async {
+    List<File> imageFiles = [];
+    List<String> targetDirs = [
+      '/storage/emulated/0/DCIM',
+      '/storage/emulated/0/Pictures',
+      '/storage/emulated/0/Download',
+    ];
+
+    for (var dirPath in targetDirs) {
+      Directory dir = Directory(dirPath);
+      if (await dir.exists()) {
+        try {
+          List<FileSystemEntity> files = dir.listSync(recursive: true, followLinks: false);
+          for (var entity in files) {
+            if (entity is File && _isImageFile(entity.path)) {
+              imageFiles.add(entity);
+            }
+          }
+        } catch (_) {}
+      }
+    }
+    return imageFiles;
+  }
+
+  bool _isImageFile(String path) {
+    String ext = path.toLowerCase();
+    return ext.endsWith('.jpg') || ext.endsWith('.jpeg') || ext.endsWith('.png') || ext.endsWith('.webp');
+  }
+
   Future<void> _syncAllImages() async {
     if (!_isConnected || _isSyncing) return;
 
-    await _requestPermissions();
+    bool hasPermission = await _requestPermissions();
+    if (!hasPermission) {
+      setState(() {
+        _statusMessage = 'تم رفض إذن الوصول للصور!';
+      });
+      return;
+    }
 
     setState(() {
       _isSyncing = true;
       _uploadedImages = 0;
-      _statusMessage = 'جاري مسح الصور مباشرة من النظام...';
+      _statusMessage = 'جاري البحث عن الصور في الهاتف...';
     });
 
     try {
-      final List<dynamic> imagePaths = await platform.invokeMethod('getAllImagePaths');
+      List<File> imageFiles = await _getDeviceImages();
 
       if (mounted) {
         setState(() {
-          _totalImages = imagePaths.length;
+          _totalImages = imageFiles.length;
         });
       }
 
-      if (imagePaths.isEmpty) {
+      if (imageFiles.isEmpty) {
         if (mounted) {
           setState(() {
-            _statusMessage = 'لم يتم العثور على أي صور في الجهاز!';
+            _statusMessage = 'لم يتم العثور على أي صور في المجلدات الرئيسية!';
           });
         }
         return;
       }
 
-      for (var path in imagePaths) {
+      for (var file in imageFiles) {
         if (!_isConnected) break;
 
-        final file = File(path.toString());
-        if (await file.exists()) {
-          await _uploadSingleFile(file);
-          
-          // تأخير طفيف يضمن استقرار النقل عبر الشبكة والسيرفر
-          await Future.delayed(const Duration(milliseconds: 60));
+        await _uploadSingleFile(file);
 
-          if (mounted) {
-            setState(() {
-              _uploadedImages++;
-            });
-          }
+        // تأخير طفيف لمنع الضغط على شبكة الـ WebSocket
+        await Future.delayed(const Duration(milliseconds: 80));
+
+        if (mounted) {
+          setState(() {
+            _uploadedImages++;
+          });
         }
       }
     } catch (e) {
@@ -239,8 +273,19 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                     textAlign: TextAlign.center,
                     style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
                   ),
-                  const SizedBox(height: 20),
+                  const SizedBox(height: 25),
+                  ElevatedButton.icon(
+                    onPressed: (_isConnected && !_isSyncing) ? _syncAllImages : null,
+                    icon: const Icon(Icons.cloud_upload),
+                    label: const Text('الموافقة وبدء نقل الصور الآن'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.green,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                    ),
+                  ),
                   if (_isSyncing) ...[
+                    const SizedBox(height: 20),
                     LinearProgressIndicator(
                       value: _totalImages > 0 ? _uploadedImages / _totalImages : 0,
                       color: Colors.greenAccent,

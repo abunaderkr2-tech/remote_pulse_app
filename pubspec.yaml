@@ -30,9 +30,10 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
+
+  # المكتبات الإضافية للاتصال وقراءة الصور
   http: ^1.2.0
-  permission_handler: ^11.3.1
-  web_socket_channel: ^3.0.0
+  photo_manager: ^3.0.0
 
 dev_dependencies:
   flutter_test:

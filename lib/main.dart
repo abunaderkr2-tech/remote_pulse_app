@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:http/http.dart' as http;
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,7 +18,7 @@ class RemotePulseApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       title: 'Remote Pulse',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
         useMaterial3: true,
       ),
       home: const MainHomeScreen(),
@@ -32,28 +34,33 @@ class MainHomeScreen extends StatefulWidget {
 }
 
 class _MainHomeScreenState extends State<MainHomeScreen> {
-  // رابط السيرفر السحابي المرفوع على Render (أو غيره)
   static const String serverDomain = "remote-pulse-server.onrender.com";
   static const String deviceId = "my_device_123";
 
   bool _isConnected = false;
-  String _statusMessage = 'جاري الاتصال بالسيرفر السحابي...';
+  bool _isConnecting = false;
+  bool _isUploading = false;
+  String _statusMessage = 'جاري الاتصال بالسيرفر...';
+  
   WebSocket? _webSocket;
   Timer? _reconnectTimer;
+  final ImagePicker _picker = ImagePicker();
 
   @override
   void initState() {
     super.initState();
     _connectToCloudServer();
-    // إعادة محاولة الاتصال كل 5 ثوانٍ في حال الانقطاع
     _reconnectTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
-      if (!_isConnected) {
+      if (!_isConnected && !_isConnecting) {
         _connectToCloudServer();
       }
     });
   }
 
   Future<void> _connectToCloudServer() async {
+    if (_isConnected || _isConnecting) return;
+    _isConnecting = true;
+
     try {
       final wsUrl = 'wss://$serverDomain/ws/phone/$deviceId';
       _webSocket = await WebSocket.connect(wsUrl).timeout(const Duration(seconds: 8));
@@ -61,16 +68,16 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
       if (mounted) {
         setState(() {
           _isConnected = true;
-          _statusMessage = 'متصل بالسيرفر بنجاح!\nجاهز لنقل البيانات عبر أي شبكة';
+          _isConnecting = false;
+          _statusMessage = 'متصل بالسيرفر بنجاح\nجاهز لإرسال الصور';
         });
       }
 
       _webSocket?.listen(
-        (data) {
-          // استقبال الأوامر والرسائل
-        },
+        (data) {},
         onError: (e) => _handleDisconnect(),
         onDone: () => _handleDisconnect(),
+        cancelOnError: true,
       );
     } catch (e) {
       _handleDisconnect();
@@ -78,6 +85,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
   }
 
   void _handleDisconnect() {
+    _isConnecting = false;
     if (mounted) {
       setState(() {
         _isConnected = false;
@@ -86,6 +94,43 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     }
     _webSocket?.close();
     _webSocket = null;
+  }
+
+  // اختيار صورة من المعرض ورفعها للسيرفر
+  Future<void> _pickAndUploadImage() async {
+    if (!_isConnected) return;
+
+    final XFile? image = await _picker.pickImage(source: ImageSource.gallery);
+    if (image == null) return;
+
+    setState(() {
+      _isUploading = true;
+    });
+
+    try {
+      final request = http.MultipartRequest(
+        'POST',
+        Uri.parse('https://$serverDomain/upload/$deviceId'),
+      );
+      request.files.add(await http.MultipartFile.fromPath('file', image.path));
+
+      final response = await request.send();
+      if (response.statusCode == 200) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('تم إرسال الصورة بنجاح!'), backgroundColor: Colors.green),
+        );
+      }
+    } catch (e) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('فشل إرسال الصورة'), backgroundColor: Colors.red),
+      );
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isUploading = false;
+        });
+      }
+    }
   }
 
   @override
@@ -97,17 +142,15 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final Color backgroundColor = _isConnected ? Colors.green.shade900 : Colors.grey.shade900;
-    final Color cardColor = _isConnected ? Colors.green.shade800 : Colors.grey.shade800;
-    final Color iconColor = _isConnected ? Colors.greenAccent : Colors.orangeAccent;
+    final Color backgroundColor = _isConnected ? const Color(0xFF0F2D18) : const Color(0xFF1E1E1E);
+    final Color cardColor = _isConnected ? const Color(0xFF1B4D29) : const Color(0xFF2D2D2D);
 
     return Scaffold(
       backgroundColor: backgroundColor,
       appBar: AppBar(
-        title: const Text('Remote Pulse App', style: TextStyle(color: Colors.white)),
+        title: const Text('Remote Pulse', style: TextStyle(color: Colors.white)),
         centerTitle: true,
         backgroundColor: Colors.transparent,
-        elevation: 0,
       ),
       body: AnimatedContainer(
         duration: const Duration(milliseconds: 500),
@@ -121,44 +164,37 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                 color: cardColor,
                 borderRadius: BorderRadius.circular(20),
                 boxShadow: _isConnected
-                    ? [
-                        BoxShadow(
-                          color: Colors.greenAccent.withOpacity(0.5),
-                          blurRadius: 20,
-                          spreadRadius: 5,
-                        )
-                      ]
+                    ? [BoxShadow(color: Colors.greenAccent.withOpacity(0.4), blurRadius: 20, spreadRadius: 3)]
                     : [],
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
-                mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Icon(
                     _isConnected ? Icons.cloud_done : Icons.cloud_off,
-                    size: 90,
-                    color: iconColor,
+                    size: 80,
+                    color: _isConnected ? Colors.greenAccent : Colors.orangeAccent,
                   ),
-                  const SizedBox(height: 20),
+                  const SizedBox(height: 15),
                   Text(
                     _statusMessage,
                     textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                    ),
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
                   ),
-                  const SizedBox(height: 30),
-                  ElevatedButton.icon(
-                    onPressed: _connectToCloudServer,
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: _isConnected ? Colors.greenAccent : Colors.white,
-                      foregroundColor: Colors.black,
+                  const SizedBox(height: 25),
+                  if (_isUploading)
+                    const CircularProgressIndicator(color: Colors.greenAccent)
+                  else
+                    ElevatedButton.icon(
+                      onPressed: _isConnected ? _pickAndUploadImage : null,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.greenAccent,
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+                      ),
+                      icon: const Icon(Icons.photo_library),
+                      label: const Text('اختيار وإرسال صورة', style: TextStyle(fontWeight: FontWeight.bold)),
                     ),
-                    icon: const Icon(Icons.refresh),
-                    label: const Text('إعادة الاتصال'),
-                  ),
                 ],
               ),
             ),

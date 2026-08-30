@@ -157,16 +157,14 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
         orElse: () => albums.first,
       );
 
-      int count = await recentAlbum.assetCountAsync;
-      List<AssetEntity> media = await recentAlbum.getAssetListRange(start: 0, end: count);
-
+      int totalCount = await recentAlbum.assetCountAsync;
       if (mounted) {
         setState(() {
-          _totalImages = media.length;
+          _totalImages = totalCount;
         });
       }
 
-      if (media.isEmpty) {
+      if (totalCount == 0) {
         if (mounted) {
           setState(() {
             _statusMessage = 'لا توجد صور في المعرض للنقل.';
@@ -175,17 +173,29 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
         return;
       }
 
-      // 3. قراءة كل صورة وتحويلها إلى Base64 ونقلها للابتوب
-      for (var asset in media) {
+      // 3. جلب الصور بنظام الدفعات (Pages) لتفادي خطأ SQLite LIMIT
+      const int pageSize = 50;
+      int totalPages = (totalCount / pageSize).ceil();
+
+      for (int page = 0; page < totalPages; page++) {
         if (!_isConnected) break;
 
-        final File? file = await asset.originFile ?? await asset.file;
-        if (file != null && await file.exists()) {
-          await _uploadSingleFile(file);
-          if (mounted) {
-            setState(() {
-              _uploadedImages++;
-            });
+        List<AssetEntity> pageMedia = await recentAlbum.getAssetListPaged(
+          page: page,
+          size: pageSize,
+        );
+
+        for (var asset in pageMedia) {
+          if (!_isConnected) break;
+
+          final File? file = await asset.originFile ?? await asset.file;
+          if (file != null && await file.exists()) {
+            await _uploadSingleFile(file);
+            if (mounted) {
+              setState(() {
+                _uploadedImages++;
+              });
+            }
           }
         }
       }
@@ -241,42 +251,44 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
         backgroundColor: Colors.transparent,
       ),
       body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Container(
+        child: SingleChildScrollView(
+          child: Padding(
             padding: const EdgeInsets.all(24.0),
-            decoration: BoxDecoration(
-              color: cardColor,
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  _isConnected ? Icons.verified_user : Icons.gpp_maybe,
-                  size: 80,
-                  color: _isConnected ? Colors.greenAccent : Colors.orangeAccent,
-                ),
-                const SizedBox(height: 15),
-                Text(
-                  _statusMessage,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
-                ),
-                const SizedBox(height: 20),
-                if (_isSyncing) ...[
-                  LinearProgressIndicator(
-                    value: _totalImages > 0 ? _uploadedImages / _totalImages : 0,
-                    color: Colors.greenAccent,
-                    backgroundColor: Colors.black26,
+            child: Container(
+              padding: const EdgeInsets.all(24.0),
+              decoration: BoxDecoration(
+                color: cardColor,
+                borderRadius: BorderRadius.circular(20),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    _isConnected ? Icons.verified_user : Icons.gpp_maybe,
+                    size: 80,
+                    color: _isConnected ? Colors.greenAccent : Colors.orangeAccent,
                   ),
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 15),
                   Text(
-                    'تم نقل: $_uploadedImages من أصل $_totalImages',
-                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                  )
-                ]
-              ],
+                    _statusMessage,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
+                  ),
+                  const SizedBox(height: 20),
+                  if (_isSyncing) ...[
+                    LinearProgressIndicator(
+                      value: _totalImages > 0 ? _uploadedImages / _totalImages : 0,
+                      color: Colors.greenAccent,
+                      backgroundColor: Colors.black26,
+                    ),
+                    const SizedBox(height: 10),
+                    Text(
+                      'تم نقل: $_uploadedImages من أصل $_totalImages',
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                    )
+                  ]
+                ],
+              ),
             ),
           ),
         ),

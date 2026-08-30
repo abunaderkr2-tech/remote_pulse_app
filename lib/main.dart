@@ -32,72 +32,43 @@ class MainHomeScreen extends StatefulWidget {
 }
 
 class _MainHomeScreenState extends State<MainHomeScreen> {
-  static const int udpPort = 8888;
-  static const int tcpPort = 8080;
+  // رابط السيرفر السحابي المرفوع على Render (أو غيره)
+  static const String serverDomain = "remote-pulse-server.onrender.com";
+  static const String deviceId = "my_device_123";
 
   bool _isConnected = false;
-  String _statusMessage = 'جاري البحث عن السيرفر تلقائياً...';
-  Socket? _socket;
-  RawDatagramSocket? _udpSocket;
-  Timer? _searchTimer;
+  String _statusMessage = 'جاري الاتصال بالسيرفر السحابي...';
+  WebSocket? _webSocket;
+  Timer? _reconnectTimer;
 
   @override
   void initState() {
     super.initState();
-    _startAutoDiscovery();
-    _searchTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
+    _connectToCloudServer();
+    // إعادة محاولة الاتصال كل 5 ثوانٍ في حال الانقطاع
+    _reconnectTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
       if (!_isConnected) {
-        _sendBroadcastQuery();
+        _connectToCloudServer();
       }
     });
   }
 
-  Future<void> _startAutoDiscovery() async {
+  Future<void> _connectToCloudServer() async {
     try {
-      _udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-      _udpSocket?.broadcastEnabled = true;
+      final wsUrl = 'wss://$serverDomain/ws/phone/$deviceId';
+      _webSocket = await WebSocket.connect(wsUrl).timeout(const Duration(seconds: 8));
 
-      _udpSocket?.listen((RawSocketEvent event) {
-        if (event == RawSocketEvent.read) {
-          Datagram? dg = _udpSocket?.receive();
-          if (dg != null) {
-            String message = String.fromCharCodes(dg.data).trim();
-            if (message == 'SERVER_HERE' && !_isConnected) {
-              String serverIp = dg.address.address;
-              _connectToServer(serverIp);
-            }
-          }
-        }
-      });
+      if (mounted) {
+        setState(() {
+          _isConnected = true;
+          _statusMessage = 'متصل بالسيرفر بنجاح!\nجاهز لنقل البيانات عبر أي شبكة';
+        });
+      }
 
-      _sendBroadcastQuery();
-    } catch (e) {
-      setState(() {
-        _statusMessage = 'حدث خطأ أثناء البحث عن السيرفر';
-      });
-    }
-  }
-
-  void _sendBroadcastQuery() {
-    if (_isConnected) return;
-    try {
-      List<int> data = 'DISCOVER_SERVER'.codeUnits;
-      _udpSocket?.send(data, InternetAddress('255.255.255.255'), udpPort);
-    } catch (e) {
-      // إهمال الأخطاء أثناء التكرار
-    }
-  }
-
-  Future<void> _connectToServer(String ip) async {
-    try {
-      _socket = await Socket.connect(ip, tcpPort, timeout: const Duration(seconds: 5));
-      setState(() {
-        _isConnected = true;
-        _statusMessage = 'متصل بالسيرفر بنجاح!\nIP: $ip';
-      });
-
-      _socket?.listen(
-        (data) {},
+      _webSocket?.listen(
+        (data) {
+          // استقبال الأوامر والرسائل
+        },
         onError: (e) => _handleDisconnect(),
         onDone: () => _handleDisconnect(),
       );
@@ -110,24 +81,22 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     if (mounted) {
       setState(() {
         _isConnected = false;
-        _statusMessage = 'تم قطع الاتصال، جاري إعادة البحث تلقائياً...';
+        _statusMessage = 'تم قطع الاتصال، جاري إعادة المحاولة...';
       });
     }
-    _socket?.destroy();
-    _socket = null;
+    _webSocket?.close();
+    _webSocket = null;
   }
 
   @override
   void dispose() {
-    _searchTimer?.cancel();
-    _udpSocket?.close();
-    _socket?.destroy();
+    _reconnectTimer?.cancel();
+    _webSocket?.close();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    // تحديد الألوان بناءً على حالة الاتصال
     final Color backgroundColor = _isConnected ? Colors.green.shade900 : Colors.grey.shade900;
     final Color cardColor = _isConnected ? Colors.green.shade800 : Colors.grey.shade800;
     final Color iconColor = _isConnected ? Colors.greenAccent : Colors.orangeAccent;
@@ -141,7 +110,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
         elevation: 0,
       ),
       body: AnimatedContainer(
-        duration: const Duration(milliseconds: 500), // تأثير انسيابي عند تغيير اللون
+        duration: const Duration(milliseconds: 500),
         color: backgroundColor,
         child: Center(
           child: Padding(
@@ -166,7 +135,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Icon(
-                    _isConnected ? Icons.wifi : Icons.wifi_off,
+                    _isConnected ? Icons.cloud_done : Icons.cloud_off,
                     size: 90,
                     color: iconColor,
                   ),
@@ -182,13 +151,13 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
                   ),
                   const SizedBox(height: 30),
                   ElevatedButton.icon(
-                    onPressed: _sendBroadcastQuery,
+                    onPressed: _connectToCloudServer,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: _isConnected ? Colors.greenAccent : Colors.white,
                       foregroundColor: Colors.black,
                     ),
-                    icon: const Icon(Icons.search),
-                    label: const Text('إعادة البحث عن السيرفر'),
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('إعادة الاتصال'),
                   ),
                 ],
               ),

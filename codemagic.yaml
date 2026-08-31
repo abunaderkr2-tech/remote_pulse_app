@@ -1,0 +1,22 @@
+workflows:
+  android-release:
+    name: Android Release APK
+    max_build_duration: 30
+    instance_type: mac_mini_m2
+    environment:
+      android_signing:
+        - keystore_reference
+      flutter: stable
+      java: 17
+    scripts:
+      - name: Set up local.properties
+        script: |
+          echo "flutter.sdk=$HOME/programs/flutter" > $CM_BUILD_DIR/android/local.properties
+      - name: Get Flutter packages
+        script: |
+          flutter packages get
+      - name: Build APK with Split ABI (Small Size)
+        script: |
+          flutter build apk --release --split-per-abi
+    artifacts:
+      - build/app/outputs/flutter-apk/*.apk

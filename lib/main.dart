@@ -64,7 +64,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
         channelId: 'remote_pulse_channel',
         channelName: 'Remote Pulse Service',
         channelDescription: 'تخدم النقل المستمر 24 ساعة في الخلفية',
-        channelImportance: NotificationChannelImportance.LOW,
+channelImportance: NotificationChannelImportance.LOW,
         priority: NotificationPriority.LOW,
       ),
       iosNotificationOptions: const IOSNotificationOptions(),

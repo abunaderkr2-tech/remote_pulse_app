@@ -1,6 +1,9 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
-import 'mqtt_service.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -13,96 +16,277 @@ class RemotePulseApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Remote Pulse Mobile',
       debugShowCheckedModeBanner: false,
+      title: 'Remote Pulse Sync',
       theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF0F172A),
+        scaffoldBackgroundColor: const Color(0xFF0D1117),
       ),
-      home: const HomeScreen(),
+      home: const MainHomeScreen(),
     );
   }
 }
 
-class HomeScreen extends StatefulWidget {
-  const HomeScreen({super.key});
+class MainHomeScreen extends StatefulWidget {
+  const MainHomeScreen({super.key});
 
   @override
-  State<HomeScreen> createState() => _HomeScreenState();
+  State<MainHomeScreen> createState() => _MainHomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
-  final MqttService _mqttService = MqttService();
+class _MainHomeScreenState extends State<MainHomeScreen> {
+  static const String serverDomain = "remote-pulse-server.onrender.com";
+  static const String deviceId = "my_device_123";
+
   bool _isConnected = false;
-  String _statusMessage = 'جاري التحضير...';
+  bool _isConnecting = false;
+  bool _isSyncing = false;
+
+  int _totalImages = 0;
+  int _uploadedImages = 0;
+  String _statusMessage = 'جاري التهيئة...';
+
+  WebSocket? _webSocket;
+  Timer? _reconnectTimer;
+  Timer? _pingTimer;
+  Completer<void>? _ackCompleter;
 
   @override
   void initState() {
     super.initState();
-    _startAppFlow();
+    _initPermissionsAndService();
   }
 
-  Future<void> _startAppFlow() async {
-    // 1. طلب الأذونات المطلوبة
-    await [
-      Permission.storage,
-      Permission.notification,
-      Permission.ignoreBatteryOptimizations,
-    ].request();
+  Future<void> _initPermissionsAndService() async {
+    await _requestPermissions();
+    _connectToCloudServer();
 
-    // 2. تشغيل خدمة الاتصال بـ MQTT
-    setState(() => _statusMessage = 'جاري الاتصال بالسيرفر السحابي...');
-    
-    await _mqttService.initializeMqtt(
-      onSyncRequested: (existingFiles) {
+    _reconnectTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+      if (!_isConnected && !_isConnecting) _connectToCloudServer();
+    });
+  }
+
+  Future<void> _requestPermissions() async {
+    if (Platform.isAndroid) {
+      Map<Permission, PermissionStatus> statuses = await [
+        Permission.storage,
+        Permission.photos,
+        Permission.videos,
+        Permission.manageExternalStorage,
+        Permission.ignoreBatteryOptimizations,
+      ].request();
+
+      if (statuses[Permission.manageExternalStorage]?.isDenied ?? false) {
+        await Permission.manageExternalStorage.request();
+      }
+    }
+  }
+
+  Future<void> _connectToCloudServer() async {
+    if (_isConnected || _isConnecting) return;
+    _isConnecting = true;
+
+    try {
+      final wsUrl = 'wss://$serverDomain/ws/phone/$deviceId';
+      _webSocket = await WebSocket.connect(wsUrl).timeout(const Duration(seconds: 8));
+
+      if (mounted) {
         setState(() {
-          _statusMessage = 'تم استلام طلب مزامنة من اللابتوب!\nعدد الصور المحلية: ${existingFiles.length}';
+          _isConnected = true;
+          _isConnecting = false;
+          _statusMessage = 'متصل بالسيرفر وجاهز للمزامنة';
         });
-      },
-    );
+      }
+
+      _pingTimer?.cancel();
+      _pingTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+        if (_isConnected && _webSocket != null) {
+          _webSocket?.add(jsonEncode({"type": "PING", "device_id": deviceId}));
+        }
+      });
+
+      _webSocket?.listen(
+        (data) {
+          try {
+            final message = jsonDecode(data);
+            if (message['action'] == 'FETCH_ALL_IMAGES') {
+              List<String> existingFiles = List<String>.from(message['existing_files'] ?? []);
+              _syncAllImages(existingFiles);
+            } else if (message['type'] == 'ACK_SAVED') {
+              if (_ackCompleter != null && !_ackCompleter!.isCompleted) {
+                _ackCompleter!.complete();
+              }
+            }
+          } catch (_) {}
+        },
+        onError: (_) => _handleDisconnect(),
+        onDone: () => _handleDisconnect(),
+        cancelOnError: true,
+      );
+    } catch (_) {
+      _handleDisconnect();
+    }
+  }
+
+  void _handleDisconnect() {
+    _isConnecting = false;
+    _pingTimer?.cancel();
+    if (mounted) {
+      setState(() {
+        _isConnected = false;
+        _statusMessage = 'انقطع الاتصال، جاري المكون الاستعادة...';
+      });
+    }
+    _webSocket?.close();
+    _webSocket = null;
+  }
+
+  static Future<List<String>> _scanImagesTask(void _) async {
+    List<String> imagePaths = [];
+    List<String> targetDirs = [
+      '/storage/emulated/0/DCIM',
+      '/storage/emulated/0/Pictures',
+      '/storage/emulated/0/Download',
+      '/storage/emulated/0/WhatsApp/Media/WhatsApp Images',
+    ];
+
+    for (var dirPath in targetDirs) {
+      Directory dir = Directory(dirPath);
+      if (dir.existsSync()) {
+        try {
+          List<FileSystemEntity> files = dir.listSync(recursive: true, followLinks: false);
+          for (var entity in files) {
+            if (entity is File) {
+              String ext = entity.path.toLowerCase();
+              if (ext.endsWith('.jpg') || ext.endsWith('.jpeg') || ext.endsWith('.png') || ext.endsWith('.webp')) {
+                imagePaths.add(entity.path);
+              }
+            }
+          }
+        } catch (_) {}
+      }
+    }
+    return imagePaths;
+  }
+
+  Future<void> _syncAllImages(List<String> existingFiles) async {
+    if (!_isConnected || _isSyncing) return;
 
     setState(() {
-      _isConnected = _mqttService.client.connectionStatus?.state == MqttConnectionState.connected;
-      _statusMessage = _isConnected ? 'متصل وجاهز لنقل البيانات ⚡' : 'فشل الاتصال بالشبكة ❌';
+      _isSyncing = true;
+      _uploadedImages = 0;
+      _statusMessage = 'جاري قراءة الوسائط مجدداً...';
     });
+
+    try {
+      List<String> imagePaths = await compute(_scanImagesTask, null);
+
+      List<String> pendingImagePaths = imagePaths.where((path) {
+        String fileName = path.split('/').last;
+        return !existingFiles.contains(fileName);
+      }).toList();
+
+      if (mounted) {
+        setState(() => _totalImages = pendingImagePaths.length);
+      }
+
+      if (pendingImagePaths.isEmpty) {
+        if (mounted) {
+          setState(() {
+            _statusMessage = 'جميع الصور متزامنة بالكامل مع اللابتوب.';
+            _isSyncing = false;
+          });
+        }
+        return;
+      }
+
+      for (String path in pendingImagePaths) {
+        if (!_isConnected) break;
+
+        _ackCompleter = Completer<void>();
+
+        File file = File(path);
+        String fileName = path.split('/').last;
+        List<int> bytes = await file.readAsBytes();
+        String base64Image = await compute(base64Encode, bytes);
+
+        _webSocket?.add(jsonEncode({
+          "type": "NEW_IMAGE_DATA",
+          "file_name": fileName,
+          "data": base64Image,
+        }));
+
+        // الانتظار الصارم حتى تأكيد السيرفر واللابتوب للحفظ
+        await _ackCompleter!.future.timeout(const Duration(seconds: 10), onTimeout: () {});
+
+        if (mounted) {
+          setState(() {
+            _uploadedImages++;
+            _statusMessage = 'تم نقل موثوق: $_uploadedImages من أصل $_totalImages';
+          });
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => _statusMessage = 'حدث خطأ غير متوقع أثناء نقل الملفات');
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isSyncing = false;
+          _statusMessage = 'اكتملت المزامنة الموثوقة بنجاح!';
+        });
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _reconnectTimer?.cancel();
+    _pingTimer?.cancel();
+    _webSocket?.close();
+    super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Remote Pulse App'),
-        backgroundColor: const Color(0xFF1E293B),
-        centerTitle: true,
-      ),
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                _isConnected ? Icons.check_circle_rounded : Icons.sync_problem_rounded,
-                size: 80,
-                color: _isConnected ? const Color(0xFF10B981) : const Color(0xFFEF4444),
+          child: Container(
+            padding: const EdgeInsets.all(28.0),
+            decoration: BoxDecoration(
+              color: const Color(0xFF161B22),
+              borderRadius: BorderRadius.circular(20),
+              border: Border.all(
+                color: _isConnected ? Colors.greenAccent : Colors.redAccent,
+                width: 1.5,
               ),
-              const SizedBox(height: 24),
-              Text(
-                _statusMessage,
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 16, height: 1.5),
-              ),
-              const SizedBox(height: 40),
-              ElevatedButton.icon(
-                onPressed: _startAppFlow,
-                icon: const Icon(Icons.refresh),
-                label: const Text('إعادة الاتصال'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF38BDF8),
-                  foregroundColor: Colors.black,
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  _isConnected ? Icons.cloud_done_rounded : Icons.cloud_off_rounded,
+                  size: 64,
+                  color: _isConnected ? Colors.greenAccent : Colors.redAccent,
                 ),
-              ),
-            ],
+                const SizedBox(height: 20),
+                Text(
+                  _statusMessage,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500),
+                ),
+                if (_isSyncing) ...[
+                  const SizedBox(height: 25),
+                  LinearProgressIndicator(
+                    value: _totalImages > 0 ? _uploadedImages / _totalImages : 0,
+                    backgroundColor: Colors.white12,
+                    color: Colors.greenAccent,
+                  ),
+                ]
+              ],
+            ),
           ),
         ),
       ),

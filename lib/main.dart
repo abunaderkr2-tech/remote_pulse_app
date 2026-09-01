@@ -94,9 +94,10 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
         });
       }
 
+      // ⚡ تقليل زمن إرسال الـ PING إلى 1.5 ثانية لضمان بقاء اللمبة خضراء دائماً في اللابتوب
       _pingTimer?.cancel();
-      _pingTimer = Timer.periodic(const Duration(seconds: 3), (_) {
-        if (_isConnected && _webSocket != null) {
+      _pingTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) {
+        if (_isConnected && _webSocket != null && _webSocket?.readyState == WebSocket.open) {
           _webSocket?.add(jsonEncode({"type": "PING", "device_id": deviceId}));
         }
       });
@@ -202,7 +203,7 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
         _ackCompleter = Completer<void>();
         String fileName = path.split('/').last;
 
-        // ⚡ ضغط الصورة تلقائياً في الذاكرة لتسريع النقل 5 أضعاف
+        // ⚡ ضغط الصورة تلقائياً في الذاكرة لسرعة نقل فائقة
         Uint8List? compressedBytes = await FlutterImageCompress.compressWithFile(
           path,
           minWidth: 1920,

@@ -43,7 +43,7 @@ Future<void> initializeService() async {
   await flutterLocalNotificationsPlugin
       .resolvePlatformSpecificImplementation<
           AndroidFlutterLocalNotificationsPlugin>()
-      ;
+      ?.createNotificationChannel(channel);
 
   await service.configure(
     androidConfiguration: AndroidConfiguration(
@@ -151,7 +151,6 @@ Future<void> _startBackgroundSync(
   for (String path in pendingPaths) {
     if (ws == null || ws.readyState != WebSocket.open) break;
 
-    Completer<void> ackCompleter = Completer<void>();
     String fileName = path.split('/').last;
 
     Uint8List? compressedBytes = await FlutterImageCompress.compressWithFile(
@@ -202,7 +201,8 @@ void _updateNotification(String title, String content) {
   );
 }
 
-static Future<List<String>> _scanImagesTask(void _) async {
+// تم حذف كلمة static من هنا لتعمل بدون أخطاء
+Future<List<String>> _scanImagesTask(void _) async {
   List<String> imagePaths = [];
   List<String> targetDirs = [
     '/storage/emulated/0/DCIM',
@@ -292,8 +292,9 @@ class _MainHomeScreenState extends State<MainHomeScreen> {
             child: const Column(
               mainAxisSize: MainAxisSize.min,
               children: [
+                // تم تعديل اسم الأيقونة هنا إلى Icons.sync_rounded
                 Icon(
-                  Icons.sync_sync_rounded,
+                  Icons.sync_rounded,
                   size: 64,
                   color: Colors.greenAccent,
                 ),

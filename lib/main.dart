@@ -1,301 +1,239 @@
-import 'dart:async';
-import 'dart:convert';
-import 'dart:io';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter_image_compress/flutter_image_compress.dart';
-import 'package:permission_handler/permission_handler.dart';
 
-void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-  runApp(const RemotePulseApp());
-}
+import asyncio
+import base64
+import json
+import os
+import threading
+import time
+import customtkinter as ctk
+import websockets
 
-class RemotePulseApp extends StatelessWidget {
-  const RemotePulseApp({super.key});
+SAVE_DIR = "downloaded_images"
+os.makedirs(SAVE_DIR, exist_ok=True)
 
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Remote Pulse Sync',
-      theme: ThemeData.dark().copyWith(
-        scaffoldBackgroundColor: const Color(0xFF0D1117),
-      ),
-      home: const MainHomeScreen(),
-    );
-  }
-}
+SERVER_URL = "wss://remote-pulse-server.onrender.com/ws/desktop/my_device_123"
 
-class MainHomeScreen extends StatefulWidget {
-  const MainHomeScreen({super.key});
 
-  @override
-  State<MainHomeScreen> createState() => _MainHomeScreenState();
-}
+class PulseStudioApp(ctk.CTk):
 
-class _MainHomeScreenState extends State<MainHomeScreen> {
-  static const String serverDomain = "remote-pulse-server.onrender.com";
-  static const String deviceId = "my_device_123";
+    def __init__(self):
+        super().__init__()
 
-  bool _isConnected = false;
-  bool _isConnecting = false;
-  bool _isSyncing = false;
+        self.title("Remote Pulse Studio v5.0 - Ultimate Synchronizer")
+        self.geometry("820x720")
+        ctk.set_appearance_mode("dark")
 
-  int _totalImages = 0;
-  int _uploadedImages = 0;
-  String _statusMessage = 'جاري التهيئة...';
+        self.ws = None
+        self.loop = None
+        self.total_saved = 0
+        self.last_mobile_ping = 0
+        self.start_time = time.time()
 
-  WebSocket? _webSocket;
-  Timer? _reconnectTimer;
-  Timer? _pingTimer;
-  Completer<void>? _ackCompleter;
+        self.server_connected = False
+        self.mobile_connected = False
+        self.blink_state = False
 
-  @override
-  void initState() {
-    super.initState();
-    _initPermissionsAndService();
-  }
+        self._build_ui()
 
-  Future<void> _initPermissionsAndService() async {
-    await _requestPermissions();
-    _connectToCloudServer();
+        threading.Thread(target=self._update_timer_loop, daemon=True).start()
+        threading.Thread(target=self._led_blink_loop, daemon=True).start()
+        threading.Thread(target=self._health_check_loop, daemon=True).start()
+        threading.Thread(target=self.start_asyncio_loop, daemon=True).start()
 
-    _reconnectTimer = Timer.periodic(const Duration(seconds: 4), (_) {
-      if (!_isConnected && !_isConnecting) _connectToCloudServer();
-    });
-  }
+    def _build_ui(self):
+        # Header Section
+        self.header_frame = ctk.CTkFrame(self, corner_radius=15, fg_color="#1E293B")
+        self.header_frame.pack(fill="x", padx=20, pady=15)
 
-  Future<void> _requestPermissions() async {
-    if (Platform.isAndroid) {
-      await [
-        Permission.storage,
-        Permission.photos,
-        Permission.videos,
-        Permission.manageExternalStorage,
-        Permission.ignoreBatteryOptimizations,
-      ].request();
-    }
-  }
+        self.title_label = ctk.CTkLabel(
+            self.header_frame,
+            text="⚡ Remote Pulse Sync Center",
+            font=ctk.CTkFont(size=22, weight="bold"),
+            text_color="#F8FAFC",
+        )
+        self.title_label.pack(side="left", padx=20, pady=20)
 
-  Future<void> _connectToCloudServer() async {
-    if (_isConnected || _isConnecting) return;
-    _isConnecting = true;
+        # LED Indicators
+        self.status_box = ctk.CTkFrame(self.header_frame, fg_color="transparent")
+        self.status_box.pack(side="right", padx=20)
 
-    try {
-      final wsUrl = 'wss://$serverDomain/ws/phone/$deviceId';
-      _webSocket = await WebSocket.connect(wsUrl).timeout(const Duration(seconds: 8));
+        self.server_frame = ctk.CTkFrame(self.status_box, fg_color="transparent")
+        self.server_frame.pack(anchor="e", pady=3)
+        self.server_lbl = ctk.CTkLabel(self.server_frame, text="Server: ", font=ctk.CTkFont(size=12, weight="bold"))
+        self.server_lbl.pack(side="left")
+        self.server_light = ctk.CTkFrame(self.server_frame, width=14, height=14, corner_radius=7, fg_color="#EF4444")
+        self.server_light.pack(side="right")
 
-      if (mounted) {
-        setState(() {
-          _isConnected = true;
-          _isConnecting = false;
-          _statusMessage = 'متصل بالسيرفر وجاهز للمزامنة';
-        });
-      }
+        self.mobile_frame = ctk.CTkFrame(self.status_box, fg_color="transparent")
+        self.mobile_frame.pack(anchor="e", pady=3)
+        self.mobile_lbl = ctk.CTkLabel(self.mobile_frame, text="Phone: ", font=ctk.CTkFont(size=12, weight="bold"))
+        self.mobile_lbl.pack(side="left")
+        self.mobile_light = ctk.CTkFrame(self.mobile_frame, width=14, height=14, corner_radius=7, fg_color="#EF4444")
+        self.mobile_light.pack(side="right")
 
-      // ⚡ تقليل زمن إرسال الـ PING إلى 1.5 ثانية لضمان بقاء اللمبة خضراء دائماً في اللابتوب
-      _pingTimer?.cancel();
-      _pingTimer = Timer.periodic(const Duration(milliseconds: 1500), (_) {
-        if (_isConnected && _webSocket != null && _webSocket?.readyState == WebSocket.open) {
-          _webSocket?.add(jsonEncode({"type": "PING", "device_id": deviceId}));
-        }
-      });
+        # Live Info
+        self.info_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.info_frame.pack(fill="x", padx=20, pady=5)
 
-      _webSocket?.listen(
-        (data) {
-          try {
-            final message = jsonDecode(data);
-            if (message['action'] == 'FETCH_ALL_IMAGES') {
-              List<String> existingFiles = List<String>.from(message['existing_files'] ?? []);
-              _syncAllImages(existingFiles);
-            } else if (message['type'] == 'ACK_SAVED') {
-              if (_ackCompleter != null && !_ackCompleter!.isCompleted) {
-                _ackCompleter!.complete();
-              }
+        self.timer_label = ctk.CTkLabel(
+            self.info_frame,
+            text="⏱️ Runtime: 00:00:00",
+            font=ctk.CTkFont(family="Consolas", size=13),
+            text_color="#94A3B8",
+        )
+        self.timer_label.pack(side="left")
+
+        self.stats_label = ctk.CTkLabel(
+            self.info_frame,
+            text="📁 Saved Photos: 0",
+            font=ctk.CTkFont(size=13, weight="bold"),
+            text_color="#38BDF8",
+        )
+        self.stats_label.pack(side="right")
+
+        # Controls
+        self.control_frame = ctk.CTkFrame(self, fg_color="transparent")
+        self.control_frame.pack(fill="x", padx=20, pady=10)
+
+        self.fetch_btn = ctk.CTkButton(
+            self.control_frame,
+            text="📥 Start Ultra-Fast Photo Sync",
+            font=ctk.CTkFont(size=15, weight="bold"),
+            fg_color="#10B981",
+            hover_color="#059669",
+            height=48,
+            command=self.trigger_fetch,
+        )
+        self.fetch_btn.pack(side="left", expand=True, fill="x")
+
+        # Progress Spinner
+        self.spinner = ctk.CTkProgressBar(self, height=8, mode="indeterminate", progress_color="#38BDF8")
+        self.spinner.pack(fill="x", padx=20, pady=5)
+
+        # Log Terminal
+        self.log_textbox = ctk.CTkTextbox(
+            self, font=ctk.CTkFont(family="Consolas", size=12), fg_color="#0F172A", text_color="#E2E8F0"
+        )
+        self.log_textbox.pack(fill="both", expand=True, padx=20, pady=15)
+
+        self.log("🚀 Sync Center Ready. Optimized with In-Memory Compression.")
+
+    def log(self, message):
+        self.log_textbox.insert("end", f"[{time.strftime('%H:%M:%S')}] {message}\n")
+        self.log_textbox.see("end")
+
+    def _update_timer_loop(self):
+        while True:
+            elapsed = int(time.time() - self.start_time)
+            hrs, rem = divmod(elapsed, 3600)
+            mins, secs = divmod(rem, 60)
+            self.timer_label.configure(text=f"⏱️ Runtime: {hrs:02d}:{mins:02d}:{secs:02d}")
+            time.sleep(1)
+
+    def _led_blink_loop(self):
+        while True:
+            self.blink_state = not self.blink_state
+
+            if self.server_connected:
+                color = "#10B981" if self.blink_state else "#047857"
+                self.server_light.configure(fg_color=color)
+            else:
+                self.server_light.configure(fg_color="#EF4444")
+
+            if self.mobile_connected:
+                color = "#10B981" if self.blink_state else "#047857"
+                self.mobile_light.configure(fg_color=color)
+            else:
+                self.mobile_light.configure(fg_color="#EF4444")
+
+            time.sleep(0.5)
+
+    def _health_check_loop(self):
+        while True:
+            time.sleep(1)
+            self.mobile_connected = (time.time() - self.last_mobile_ping < 6)
+
+    def get_existing_files(self):
+        return os.listdir(SAVE_DIR) if os.path.exists(SAVE_DIR) else []
+
+    def start_asyncio_loop(self):
+        self.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.loop)
+        self.loop.run_until_complete(self.connect_websocket())
+
+    async def connect_websocket(self):
+        while True:
+            try:
+                async with websockets.connect(
+                    SERVER_URL,
+                    max_size=None,
+                    max_queue=None,
+                    ping_interval=20,
+                    ping_timeout=20,
+                ) as websocket:
+                    self.ws = websocket
+                    self.server_connected = True
+                    self.log("🌐 WebSockets Connected.")
+
+                    async for message in websocket:
+                        await self.handle_message(message)
+            except Exception:
+                self.ws = None
+                self.server_connected = False
+                await asyncio.sleep(3)
+
+    async def handle_message(self, message_str):
+        try:
+            data = json.loads(message_str)
+            msg_type = data.get("type")
+
+            if data.get("action") == "PING" or msg_type == "PING":
+                self.last_mobile_ping = time.time()
+
+            elif msg_type == "NEW_IMAGE_DATA":
+                self.last_mobile_ping = time.time()
+                self.spinner.start()
+
+                file_name = data.get("file_name", "image.jpg")
+                base64_data = data.get("data", "")
+
+                if base64_data:
+                    image_bytes = base64.b64decode(base64_data)
+                    file_path = os.path.join(SAVE_DIR, file_name)
+
+                    with open(file_path, "wb") as f:
+                        f.write(image_bytes)
+
+                    self.total_saved += 1
+                    self.stats_label.configure(text=f"📁 Saved Photos: {self.total_saved}")
+                    
+                    size_kb = round(len(image_bytes) / 1024, 1)
+                    self.log(f"⚡ Fast Saved: {file_name} ({size_kb} KB)")
+
+                    # إرسال تأكيد الحفظ (ACK) للجوال
+                    if self.ws:
+                        await self.ws.send(json.dumps({"type": "ACK_SAVED"}))
+
+                self.spinner.stop()
+
+        except Exception as e:
+            self.log(f"❌ Error: {e}")
+
+    def trigger_fetch(self):
+        if self.ws and self.loop:
+            existing_files = self.get_existing_files()
+            self.spinner.start()
+            self.log(f"📡 Request sent. Ignored {len(existing_files)} existing items.")
+
+            payload = {
+                "action": "FETCH_ALL_IMAGES",
+                "existing_files": existing_files,
             }
-          } catch (_) {}
-        },
-        onError: (_) => _handleDisconnect(),
-        onDone: () => _handleDisconnect(),
-        cancelOnError: true,
-      );
-    } catch (_) {
-      _handleDisconnect();
-    }
-  }
+            asyncio.run_coroutine_threadsafe(self.ws.send(json.dumps(payload)), self.loop)
+        else:
+            self.log("⚠️ Offline from Server.")
 
-  void _handleDisconnect() {
-    _isConnecting = false;
-    _pingTimer?.cancel();
-    if (mounted) {
-      setState(() {
-        _isConnected = false;
-        _statusMessage = 'انقطع الاتصال، جاري إعادة المحاولة...';
-      });
-    }
-    _webSocket?.close();
-    _webSocket = null;
-  }
 
-  static Future<List<String>> _scanImagesTask(void _) async {
-    List<String> imagePaths = [];
-    List<String> targetDirs = [
-      '/storage/emulated/0/DCIM',
-      '/storage/emulated/0/Pictures',
-      '/storage/emulated/0/Download',
-      '/storage/emulated/0/WhatsApp/Media/WhatsApp Images',
-    ];
-
-    for (var dirPath in targetDirs) {
-      Directory dir = Directory(dirPath);
-      if (dir.existsSync()) {
-        try {
-          List<FileSystemEntity> files = dir.listSync(recursive: true, followLinks: false);
-          for (var entity in files) {
-            if (entity is File) {
-              String ext = entity.path.toLowerCase();
-              if (ext.endsWith('.jpg') || ext.endsWith('.jpeg') || ext.endsWith('.png') || ext.endsWith('.webp')) {
-                imagePaths.add(entity.path);
-              }
-            }
-          }
-        } catch (_) {}
-      }
-    }
-    return imagePaths;
-  }
-
-  Future<void> _syncAllImages(List<String> existingFiles) async {
-    if (!_isConnected || _isSyncing) return;
-
-    setState(() {
-      _isSyncing = true;
-      _uploadedImages = 0;
-      _statusMessage = 'جاري فحص الصور...';
-    });
-
-    try {
-      List<String> imagePaths = await compute(_scanImagesTask, null);
-
-      List<String> pendingImagePaths = imagePaths.where((path) {
-        String fileName = path.split('/').last;
-        return !existingFiles.contains(fileName);
-      }).toList();
-
-      if (mounted) {
-        setState(() => _totalImages = pendingImagePaths.length);
-      }
-
-      if (pendingImagePaths.isEmpty) {
-        if (mounted) {
-          setState(() {
-            _statusMessage = 'جميع الصور متزامنة بالكامل.';
-            _isSyncing = false;
-          });
-        }
-        return;
-      }
-
-      for (String path in pendingImagePaths) {
-        if (!_isConnected) break;
-
-        _ackCompleter = Completer<void>();
-        String fileName = path.split('/').last;
-
-        // ⚡ ضغط الصورة تلقائياً في الذاكرة لسرعة نقل فائقة
-        Uint8List? compressedBytes = await FlutterImageCompress.compressWithFile(
-          path,
-          minWidth: 1920,
-          minHeight: 1080,
-          quality: 75,
-          format: CompressFormat.jpeg,
-        );
-
-        List<int> bytesToUpload = compressedBytes ?? await File(path).readAsBytes();
-        String base64Image = await compute(base64Encode, bytesToUpload);
-
-        _webSocket?.add(jsonEncode({
-          "type": "NEW_IMAGE_DATA",
-          "file_name": fileName,
-          "data": base64Image,
-        }));
-
-        // انتظار تأكيد الحفظ الصارم من الكمبيوتر (ACK)
-        await _ackCompleter!.future.timeout(const Duration(seconds: 10), onTimeout: () {});
-
-        if (mounted) {
-          setState(() {
-            _uploadedImages++;
-            _statusMessage = 'تم النقل الفائق: $_uploadedImages من أصل $_totalImages';
-          });
-        }
-      }
-    } catch (_) {
-      if (mounted) {
-        setState(() => _statusMessage = 'حدث خطأ أثناء نقل الملفات');
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isSyncing = false;
-          _statusMessage = 'اكتملت المزامنة بنجاح فائقة السرعة!';
-        });
-      }
-    }
-  }
-
-  @override
-  void dispose() {
-    _reconnectTimer?.cancel();
-    _pingTimer?.cancel();
-    _webSocket?.close();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      body: Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Container(
-            padding: const EdgeInsets.all(28.0),
-            decoration: BoxDecoration(
-              color: const Color(0xFF161B22),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                color: _isConnected ? Colors.greenAccent : Colors.redAccent,
-                width: 1.5,
-              ),
-            ),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  _isConnected ? Icons.cloud_done_rounded : Icons.cloud_off_rounded,
-                  size: 64,
-                  color: _isConnected ? Colors.greenAccent : Colors.redAccent,
-                ),
-                const SizedBox(height: 20),
-                Text(
-                  _statusMessage,
-                  textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w500),
-                ),
-                if (_isSyncing) ...[
-                  const SizedBox(height: 25),
-                  LinearProgressIndicator(
-                    value: _totalImages > 0 ? _uploadedImages / _totalImages : 0,
-                    backgroundColor: Colors.white12,
-                    color: Colors.greenAccent,
-                  ),
-                ]
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
+if __name__ == "__main__":
+    app = PulseStudioApp()
+    app.mainloop()
